@@ -1,0 +1,339 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+  <title>SL2T iPhone Sign-to-Text</title>
+  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/holistic@0.5.1675471629/holistic.js" crossorigin="anonymous"></script>
+  <style>
+    :root {
+      --bg: #0b0d13;
+      --panel: #151922;
+      --border: #262c3a;
+      --accent: #3b82f6;
+      --green: #10b981;
+      --pink: #ec4899;
+      --text: #f3f4f6;
+      --muted: #9ca3af;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; font-family: -apple-system, BlinkMacSystemFont, sans-serif; }
+    body { background: var(--bg); color: var(--text); padding: 12px; display: flex; flex-direction: column; gap: 12px; }
+    .header { display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 8px; }
+    .status { font-size: 12px; font-weight: 600; padding: 4px 10px; border-radius: 999px; background: #1f2937; color: #f59e0b; }
+    .status.ready { background: rgba(16, 185, 129, 0.15); color: var(--green); }
+    .card { background: var(--panel); border: 1px solid var(--border); border-radius: 12px; padding: 12px; display: flex; flex-direction: column; gap: 10px; }
+    .viewport { position: relative; width: 100%; aspect-ratio: 3/4; max-height: 52vh; background: #05070a; border-radius: 10px; overflow: hidden; border: 1px solid var(--border); }
+    /* Keep video 1x1px in DOM so iOS Safari decodes camera frames continuously */
+    video { position: absolute; width: 1px; height: 1px; opacity: 0.01; pointer-events: none; }
+    canvas { width: 100%; height: 100%; object-fit: cover; transform: scaleX(-1); }
+    .hud { position: absolute; top: 8px; left: 8px; background: rgba(11, 13, 19, 0.8); padding: 6px 10px; border-radius: 6px; font-family: ui-monospace, monospace; font-size: 11px; line-height: 1.4; border-left: 3px solid var(--green); pointer-events: none; }
+    .transcript { background: #07090e; border: 1px solid var(--border); border-radius: 10px; padding: 12px; min-height: 70px; font-size: 20px; font-weight: 600; display: flex; align-items: center; flex-wrap: wrap; gap: 6px; }
+    .live-word { color: var(--green); border-bottom: 2px dashed var(--green); }
+    .btn-row { display: flex; gap: 8px; flex-wrap: wrap; }
+    button { flex: 1; min-width: 110px; background: var(--accent); color: #fff; border: none; padding: 11px 12px; border-radius: 8px; font-weight: 600; font-size: 14px; cursor: pointer; }
+    button.secondary { background: #262c3a; color: var(--text); }
+    button.green { background: var(--green); color: #052e16; }
+    button.record { background: var(--pink); }
+    input[type="text"] { width: 100%; background: #07090e; border: 1px solid var(--border); color: var(--text); padding: 10px 12px; border-radius: 8px; font-size: 14px; }
+    .chips { display: flex; gap: 5px; flex-wrap: wrap; }
+    .chip { background: #1e2433; border: 1px solid #2e364a; padding: 3px 7px; border-radius: 5px; font-size: 11px; color: #cbd5e1; }
+  </style>
+</head>
+<body>
+
+  <div class="header">
+    <h3>SL2T iPhone Port</h3>
+    <span id="statusPill" class="status">Tap "Start iPhone Camera"</span>
+  </div>
+
+  <div class="card">
+    <div class="btn-row">
+      <button id="startBtn">Start iPhone Camera</button>
+      <button id="privacyBtn" class="secondary">Video: Hidden</button>
+    </div>
+
+    <div class="viewport">
+      <video id="videoEl" autoplay muted playsinline></video>
+      <canvas id="canvasEl" width="480" height="640"></canvas>
+      <div class="hud">
+        130-Pt SL2T Stream<br>
+        FPS: <span id="fpsEl">0</span>
+      </div>
+    </div>
+
+    <div class="transcript">
+      <span id="sentenceEl"></span>
+      <span id="liveTokenEl" class="live-word">[Waiting...]</span>
+    </div>
+
+    <div class="btn-row">
+      <button id="copyBtn" class="green">Copy Text</button>
+      <button id="shareBtn">Send to iMessage</button>
+      <button id="clearBtn" class="secondary">Clear</button>
+    </div>
+  </div>
+
+  <div class="card">
+    <input type="text" id="customSignInput" placeholder="Type new word (e.g. COFFEE) to teach..." />
+    <button id="recordSignBtn" class="record">Record Custom Sign (1.5s)</button>
+    <div class="chips" id="vocabList">
+      <span class="chip">HELLO</span>
+      <span class="chip">THANK YOU</span>
+      <span class="chip">PLEASE</span>
+      <span class="chip">YES</span>
+      <span class="chip">NO</span>
+      <span class="chip">I LOVE YOU</span>
+      <span class="chip">WHAT?</span>
+      <span class="chip">A / B / V / 5</span>
+    </div>
+  </div>
+
+<script>
+const POSE_14 = [0, 2, 5, 7, 8, 11, 12, 13, 14, 15, 16, 23, 24, 25];
+const FACE_74 = [
+  61, 146, 91, 181, 84, 17, 314, 405, 321, 375, 291, 185, 40, 39, 37, 0, 267, 269, 270, 409,
+  78, 95, 88, 178, 87, 14, 317, 402, 318, 324, 308, 191, 80, 81, 82, 13, 312, 311, 310, 415,
+  70, 63, 105, 66, 107, 55, 65, 52, 53, 46, 300, 293, 334, 296, 336, 285, 295, 282, 283, 276,
+  33, 160, 158, 133, 153, 362, 385, 387, 263, 373, 10, 152, 234, 454
+];
+
+const rollingBuffer = [];
+const customSigns = [];
+let isRecordingCustom = false;
+let recordedFrames = [];
+let showRawVideo = false;
+let sentenceWords = [];
+let lastPred = "";
+let holdFrames = 0;
+
+function sliceToSL2T130(results) {
+  const out = new Float32Array(260);
+  let k = 0;
+  if (results.leftHandLandmarks) {
+    for (let i = 0; i < 21; i++) { out[k++] = results.leftHandLandmarks[i].x; out[k++] = results.leftHandLandmarks[i].y; }
+  } else { k += 42; }
+  if (results.rightHandLandmarks) {
+    for (let i = 0; i < 21; i++) { out[k++] = results.rightHandLandmarks[i].x; out[k++] = results.rightHandLandmarks[i].y; }
+  } else { k += 42; }
+  if (results.poseLandmarks) {
+    for (const idx of POSE_14) { const p = results.poseLandmarks[idx]; out[k++] = p ? p.x : 0; out[k++] = p ? p.y : 0; }
+  } else { k += 28; }
+  if (results.faceLandmarks) {
+    for (const idx of FACE_74) { const f = results.faceLandmarks[idx]; out[k++] = f ? f.x : 0; out[k++] = f ? f.y : 0; }
+  }
+  return out;
+}
+
+function extractNormalizedFeatureVector(packet260) {
+  const feat = new Float32Array(96);
+  const lsX = packet260[94] || 0.5, lsY = packet260[95] || 0.5;
+  const rsX = packet260[96] || 0.5, rsY = packet260[97] || 0.5;
+  const cx = (lsX + rsX) / 2, cy = (lsY + rsY) / 2;
+  const scale = Math.max(0.08, Math.hypot(lsX - rsX, lsY - rsY));
+  for (let i = 0; i < 48; i++) {
+    const rx = packet260[i * 2], ry = packet260[i * 2 + 1];
+    feat[i * 2] = rx === 0 ? 0 : (rx - cx) / scale;
+    feat[i * 2 + 1] = ry === 0 ? 0 : (ry - cy) / scale;
+  }
+  return feat;
+}
+
+function classifySign(buffer) {
+  if (buffer.length < 6) return "[Warming up...]";
+  const cur = buffer[buffer.length - 1];
+  const hasRight = cur[42] !== 0 || cur[43] !== 0;
+  const hasLeft = cur[0] !== 0 || cur[1] !== 0;
+  if (!hasRight && !hasLeft) return "[Show hand...]";
+
+  if (customSigns.length > 0 && buffer.length >= 16) {
+    const recentNorm = buffer.slice(-16).map(extractNormalizedFeatureVector);
+    let bestLabel = null, bestDist = 0.28;
+    for (const sign of customSigns) {
+      let totalDist = 0;
+      const len = Math.min(recentNorm.length, sign.template.length);
+      for (let f = 0; f < len; f++) {
+        const a = recentNorm[recentNorm.length - len + f];
+        const b = sign.template[sign.template.length - len + f];
+        let fd = 0;
+        for (let j = 0; j < a.length; j++) fd += Math.abs(a[j] - b[j]);
+        totalDist += fd / a.length;
+      }
+      if (totalDist / len < bestDist) { bestDist = totalDist / len; bestLabel = sign.label; }
+    }
+    if (bestLabel) return bestLabel;
+  }
+
+  const base = hasRight ? 42 : 0;
+  const pt = (i) => ({ x: cur[base + i * 2], y: cur[base + i * 2 + 1] });
+  const wrist = pt(0), thumbTip = pt(4), indexPip = pt(6), indexTip = pt(8);
+  const middlePip = pt(10), middleTip = pt(12), ringPip = pt(14), ringTip = pt(16);
+  const pinkyPip = pt(18), pinkyTip = pt(20);
+
+  const nose = { x: cur[84], y: cur[85] };
+  const chin = { x: cur[254], y: cur[255] };
+  const chestY = (cur[95] + cur[97]) / 2;
+
+  const indexUp = indexTip.y < indexPip.y - 0.02;
+  const middleUp = middleTip.y < middlePip.y - 0.02;
+  const ringUp = ringTip.y < ringPip.y - 0.02;
+  const pinkyUp = pinkyTip.y < pinkyPip.y - 0.02;
+  const thumbOut = Math.hypot(thumbTip.x - indexPip.x, thumbTip.y - indexPip.y) > 0.07;
+
+  const prev = buffer[Math.max(0, buffer.length - 8)];
+  const dyWrist = wrist.y - prev[base + 1];
+  const dxWrist = wrist.x - prev[base];
+
+  if (hasLeft && hasRight && indexUp && middleUp && Math.abs(dxWrist) > 0.025 && wrist.y > nose.y) return "WHAT?";
+  if (indexUp && middleUp && ringUp && pinkyUp && indexTip.y < nose.y + 0.02) return "HELLO";
+  if (indexUp && middleUp && ringUp && pinkyUp && Math.hypot(middleTip.x - chin.x, middleTip.y - chin.y) < 0.15 && dyWrist > 0.015) return "THANK YOU";
+  if (indexUp && middleUp && ringUp && pinkyUp && Math.abs(wrist.y - chestY) < 0.12 && Math.abs(dxWrist) > 0.02) return "PLEASE";
+  if (thumbOut && indexUp && !middleUp && !ringUp && pinkyUp) return "I LOVE YOU";
+  if (!indexUp && !middleUp && !ringUp && !pinkyUp && Math.abs(indexTip.y - prev[base + 17]) > 0.03) return "YES";
+  if (indexUp && middleUp && !ringUp && !pinkyUp && Math.hypot(indexTip.x - thumbTip.x, indexTip.y - thumbTip.y) < 0.055) return "NO";
+  if (indexUp && middleUp && !ringUp && !pinkyUp && Math.abs(indexTip.x - middleTip.x) > 0.035) return "V";
+  if (indexUp && middleUp && ringUp && pinkyUp && !thumbOut) return "B";
+  if (indexUp && middleUp && ringUp && pinkyUp && thumbOut) return "5";
+  if (!indexUp && !middleUp && !ringUp && !pinkyUp && thumbOut) return "A";
+  return "...";
+}
+
+const videoEl = document.getElementById('videoEl');
+const canvasEl = document.getElementById('canvasEl');
+const ctx = canvasEl.getContext('2d');
+const statusPill = document.getElementById('statusPill');
+const fpsEl = document.getElementById('fpsEl');
+const liveTokenEl = document.getElementById('liveTokenEl');
+const sentenceEl = document.getElementById('sentenceEl');
+
+let lastTime = performance.now();
+
+function onHolisticResults(results) {
+  const now = performance.now();
+  fpsEl.textContent = Math.min(60, Math.round(1000 / Math.max(1, now - lastTime)));
+  lastTime = now;
+
+  if (videoEl.videoWidth && canvasEl.width !== videoEl.videoWidth) {
+    canvasEl.width = videoEl.videoWidth;
+    canvasEl.height = videoEl.videoHeight;
+  }
+
+  const packet260 = sliceToSL2T130(results);
+  rollingBuffer.push(packet260);
+  if (rollingBuffer.length > 30) rollingBuffer.shift();
+
+  if (isRecordingCustom) recordedFrames.push(extractNormalizedFeatureVector(packet260));
+
+  ctx.save();
+  ctx.clearRect(0, 0, canvasEl.width, canvasEl.height);
+  if (showRawVideo) ctx.drawImage(results.image, 0, 0, canvasEl.width, canvasEl.height);
+
+  const drawPts = (start, count, color, r) => {
+    ctx.fillStyle = color;
+    for (let i = 0; i < count; i++) {
+      const x = packet260[start + i * 2] * canvasEl.width;
+      const y = packet260[start + i * 2 + 1] * canvasEl.height;
+      if (x > 0 && y > 0) { ctx.beginPath(); ctx.arc(x, y, r, 0, Math.PI * 2); ctx.fill(); }
+    }
+  };
+  drawPts(0, 21, '#10b981', 4);
+  drawPts(42, 21, '#3b82f6', 4);
+  drawPts(84, 14, '#f59e0b', 5);
+  drawPts(112, 74, '#ec4899', 2);
+  ctx.restore();
+
+  const pred = classifySign(rollingBuffer);
+  liveTokenEl.textContent = isRecordingCustom ? "RECORDING..." : pred;
+
+  if (!isRecordingCustom && pred && !pred.startsWith("[") && pred !== "...") {
+    if (pred === lastPred) {
+      holdFrames++;
+      if (holdFrames === 11) {
+        if (sentenceWords[sentenceWords.length - 1] !== pred) {
+          sentenceWords.push(pred);
+          sentenceEl.textContent = sentenceWords.join(" ") + " ";
+        }
+        holdFrames = 0;
+      }
+    } else { lastPred = pred; holdFrames = 1; }
+  }
+}
+
+const holistic = new Holistic({
+  locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/holistic@0.5.1675471629/${file}`
+});
+holistic.setOptions({ modelComplexity: 1, smoothLandmarks: true, minDetectionConfidence: 0.5, minTrackingConfidence: 0.5 });
+holistic.onResults(onHolisticResults);
+
+document.getElementById('startBtn').onclick = async () => {
+  try {
+    statusPill.textContent = "Starting Camera...";
+    videoEl.setAttribute('autoplay', '');
+    videoEl.setAttribute('muted', '');
+    videoEl.setAttribute('playsinline', '');
+    const stream = await navigator.mediaDevices.getUserMedia({
+      video: { facingMode: "user", width: { ideal: 480 }, height: { ideal: 640 } },
+      audio: false
+    });
+    videoEl.srcObject = stream;
+    await videoEl.play();
+    statusPill.textContent = "Live on iPhone";
+    statusPill.classList.add("ready");
+
+    async function loop() {
+      if (videoEl.readyState >= 2) await holistic.send({ image: videoEl });
+      requestAnimationFrame(loop);
+    }
+    requestAnimationFrame(loop);
+  } catch (err) {
+    statusPill.textContent = "Error: " + err.message;
+    alert("Camera Error: " + err.message + "\nMake sure you opened the https:// github.io link in Safari!");
+  }
+};
+
+document.getElementById('privacyBtn').onclick = (e) => {
+  showRawVideo = !showRawVideo;
+  e.target.textContent = `Video: ${showRawVideo ? 'Shown' : 'Hidden'}`;
+};
+
+document.getElementById('clearBtn').onclick = () => { sentenceWords = []; sentenceEl.textContent = ""; };
+
+document.getElementById('copyBtn').onclick = async () => {
+  const txt = sentenceWords.join(" ").trim();
+  if (!txt) return alert("Sign a word first!");
+  await navigator.clipboard.writeText(txt);
+  statusPill.textContent = "Copied to Clipboard!";
+};
+
+document.getElementById('shareBtn').onclick = async () => {
+  const txt = sentenceWords.join(" ").trim();
+  if (navigator.share && txt) await navigator.share({ text: txt });
+  else alert("Sign a word first!");
+};
+
+document.getElementById('recordSignBtn').onclick = (e) => {
+  const label = document.getElementById('customSignInput').value.trim().toUpperCase();
+  if (!label) return alert("Type a word in the box first!");
+  isRecordingCustom = true;
+  recordedFrames = [];
+  e.target.textContent = "Perform Sign Now...";
+  setTimeout(() => {
+    isRecordingCustom = false;
+    e.target.textContent = "Record Custom Sign (1.5s)";
+    if (recordedFrames.length >= 6) {
+      customSigns.push({ label, template: recordedFrames.slice(-16) });
+      const chip = document.createElement('span');
+      chip.className = 'chip';
+      chip.style.borderColor = '#ec4899';
+      chip.textContent = label;
+      document.getElementById('vocabList').appendChild(chip);
+      document.getElementById('customSignInput').value = "";
+    } else {
+      alert("Tap 'Start iPhone Camera' first so your hands are visible!");
+    }
+  }, 1500);
+};
+</script>
+</body>
+</html>
